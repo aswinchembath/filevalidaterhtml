@@ -12,9 +12,12 @@
         .card { background-color: white; border-radius: 1rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); }
         .input-group { display: flex; flex-direction: column; margin-bottom: 1rem; }
         .input-group label { margin-bottom: 0.25rem; font-weight: 500; color: #374151; }
+        
+        /* New Row-Wise Styles */
         .mismatch-cell { color: #dc2626; font-weight: 600; }
-        .matched-row { background-color: #f0fdf4; }
-        .unmatched-row { background-color: #fef2f2; }
+        .source-row { background-color: #eff6ff; /* Light Blue/Blue-50 */ }
+        .dest-row { background-color: #f9fafb; /* Very Light Gray/Gray-50 */ }
+        .unmatched-record { background-color: #fef2f2; /* Light Red/Red-50 for SOURCE/DESTINATION_ONLY */ }
     </style>
     <!-- Load PapaParse (for handling different delimiters) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
@@ -32,17 +35,19 @@
         <div class="card p-6 md:p-8 space-y-6">
             <!-- 1. Configuration Inputs -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- File 1: Source -->
                 <div class="input-group">
                     <label for="csvFile1">File 1 (Source: Comma-separated , )</label>
                     <input type="file" id="csvFile1" accept=".csv" class="p-2 border border-gray-300 rounded-lg hover:border-indigo-500 transition duration-150">
                 </div>
 
+                <!-- File 2: Destination -->
                 <div class="input-group">
                     <label for="csvFile2">File 2 (Destination: Pipe-separated | )</label>
                     <input type="file" id="csvFile2" accept=".csv, .txt" class="p-2 border border-gray-300 rounded-lg hover:border-indigo-500 transition duration-150">
                 </div>
 
-                <!-- Key Configuration Block (Updated for choice) -->
+                <!-- Key Configuration Block -->
                 <div class="input-group">
                     <label class="mb-2 font-medium text-gray-700">Select Comparison Key Type:</label>
                     <div class="flex space-x-4 mb-3">
@@ -59,6 +64,13 @@
                     <label id="pkLabel" for="pkColumn" class="font-medium text-gray-500 text-sm">Primary Key Column Name (e.g., ID)</label>
                     <input type="text" id="pkColumn" value="ID" placeholder="Enter a single column name" class="p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500">
                     <p id="pkHelpText" class="mt-1 text-xs text-gray-500">Only enter the name of the single unique column used for matching.</p>
+                </div>
+
+                <!-- NEW: Header Filter File Input -->
+                <div class="input-group md:col-span-3">
+                    <label for="headerFile">Optional: Header Filter File (Pipe-separated | )</label>
+                    <input type="file" id="headerFile" accept=".csv, .txt" class="p-2 border border-gray-300 rounded-lg hover:border-green-500 transition duration-150">
+                    <p class="mt-1 text-xs text-gray-500">If provided, the final report will ONLY contain these headers (plus the keys), in the order specified, which is useful for cleaning up the final report.</p>
                 </div>
             </div>
 
@@ -104,6 +116,7 @@
         const pkHelpText = document.getElementById('pkHelpText');
         const llmResultDiv = document.getElementById('llmResult');
         const llmSummaryText = document.getElementById('llmSummaryText');
+        const headerFile = document.getElementById('headerFile'); // NEW reference
 
         // Global storage for the last successful comparison result
         let lastComparisonResult = null;
@@ -198,7 +211,7 @@
         }
 
 
-        // --- Core Data Functions (Unchanged, as they already support both modes) ---
+        // --- Core Data Functions ---
 
         /**
          * Parses a file using PapaParse.
@@ -228,7 +241,6 @@
         
         /**
          * Generates a composite key string from a data row and a list of column names.
-         * The key is trimmed and converted to upper case for robust, case-insensitive, and whitespace-agnostic matching.
          * @param {Object} row - The data row object.
          * @param {Array<string>} pkColumns - Array of column names to concatenate.
          * @returns {string} - The composite key.
@@ -240,8 +252,9 @@
 
         /**
          * Core comparison logic: Matches records and finds cell-level differences using a composite key.
+         * Accepts an optional reportHeaders array to filter and order the output columns.
          */
-        function performComparison(sourceData, destData, compositeKeyColumns) {
+        function performComparison(sourceData, destData, compositeKeyColumns, providedReportHeaders) {
             // 1. Build a Map of Source Data for quick lookup using the composite key
             const sourceMap = new Map();
             sourceData.forEach(row => {
@@ -257,9 +270,21 @@
             const allUniqueHeaders = Array.from(new Set([...sourceKeys, ...destKeys]));
             
             const keySet = new Set(compositeKeyColumns);
-            const nonKeyHeaders = allUniqueHeaders.filter(h => !keySet.has(h));
+            const allAvailableHeadersSet = new Set(allUniqueHeaders);
+            
+            let nonKeyHeaders;
+            
+            if (providedReportHeaders && providedReportHeaders.length > 0) {
+                // If header filter file is provided, use its headers, exclude keys, and ensure they exist
+                nonKeyHeaders = providedReportHeaders
+                    .filter(h => !keySet.has(h))
+                    .filter(h => allAvailableHeadersSet.has(h));
+            } else {
+                // Otherwise, use all available non-key headers
+                nonKeyHeaders = allUniqueHeaders.filter(h => !keySet.has(h));
+            }
 
-            const comparisonRows = [];
+            const comparisonRows = []; // Stores one object per key
             const matchedPks = new Set();
 
             // 3. Compare Destination data against Source
@@ -269,24 +294,23 @@
                 matchedPks.add(compositeKey);
 
                 const comparisonRow = {
-                    // Store key values individually for display/export
                     keyValues: compositeKeyColumns.map(h => ({
                         header: h,
-                        // Use Source value if available, otherwise use Dest (for DESTINATION_ONLY)
                         source: sourceRow ? (sourceRow[h] || '') : (destRow[h] || ''),
                         dest: destRow[h] || '',
                     })),
                     status: sourceRow ? 'MATCHED' : 'DESTINATION_ONLY',
                     diffs: 0,
-                    cells: {} // Stores data for non-key headers
+                    // cells structure holds the comparison result for the non-key (data) columns
+                    cells: {} 
                 };
 
-                // Compare non-key columns for differences
+                // Compare non-key columns for differences (using the filtered list)
                 nonKeyHeaders.forEach(header => {
+                    // Normalize values for comparison (trim and coalesce to empty string)
                     const sourceValue = sourceRow ? (sourceRow[header] || '').trim() : '';
                     const destValue = (destRow[header] || '').trim();
 
-                    // Comparison is based on trimmed values
                     const isDiff = sourceValue !== destValue;
 
                     if (isDiff) {
@@ -310,13 +334,12 @@
             sourceData.forEach(sourceRow => {
                 const compositeKey = getCompositeKey(sourceRow, compositeKeyColumns);
                 
-                // If the key exists in sourceMap but wasn't matched against a dest row
                 if (!matchedPks.has(compositeKey) && sourceMap.has(compositeKey)) {
                     const comparisonRow = {
                         keyValues: compositeKeyColumns.map(h => ({
                             header: h,
                             source: sourceRow[h] || '',
-                            dest: '' // Destination is blank for SOURCE_ONLY
+                            dest: '' 
                         })),
                         status: 'SOURCE_ONLY',
                         diffs: 0, 
@@ -326,7 +349,7 @@
                     nonKeyHeaders.forEach(header => {
                         comparisonRow.cells[header] = {
                             source: sourceRow[header] || '',
-                            dest: '', // Destination is blank
+                            dest: '', 
                             isDiff: true // Mark as diff since record is missing
                         };
                     });
@@ -341,7 +364,7 @@
             };
         }
 
-        // --- LLM Insight Generation Function ---
+        // --- LLM Insight Generation Function (Unchanged) ---
 
         function getComparisonMetrics(comparisonResult) {
             const { rows, nonKeyHeaders } = comparisonResult;
@@ -454,8 +477,47 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
                 llmButton.textContent = "✨ Summarize Comparison Insights";
             }
         }
+        
+        // --- NEW: Summary Sheet Generation ---
+        
+        /**
+         * Creates and appends the Summary worksheet to the workbook.
+         */
+        function createSummarySheet(wb, metrics) {
+            const summaryData = [
+                [{ v: "Metric", t: 's', s: { font: { bold: true } } }, { v: "Value", t: 's', s: { font: { bold: true } } }],
+                [{ v: '---', t: 's' }, { v: '---', t: 's' }],
+                ["Total Source Records", metrics.totalSource],
+                ["Total Destination Records", metrics.totalDestination],
+                [{ v: '---', t: 's' }, { v: '---', t: 's' }],
+                [{ v: "Matched Records (Exact Match)", t: 's', s: { font: { bold: true } } }, metrics.matched],
+                [{ v: "Mismatched Records (Data Differences)", t: 's', s: { font: { bold: true, color: { rgb: "FFCC0000" } } } }, metrics.mismatched],
+                [{ v: "Source-Only Records (Missing in Dest)", t: 's', s: { font: { bold: true, color: { rgb: "FFCC0000" } } } }, metrics.sourceOnly],
+                [{ v: "Destination-Only Records (Extra in Dest)", t: 's', s: { font: { bold: true, color: { rgb: "FFCC0000" } } } }, metrics.destOnly],
+                [{ v: '---', t: 's' }, { v: '---', t: 's' }],
+                [{ v: "Fields with Mismatches (Top 5)", t: 's', s: { font: { bold: true } } }, { v: "Count", t: 's', s: { font: { bold: true } } }],
+                [{ v: '---', t: 's' }, { v: '---', t: 's' }],
+            ];
 
-        // --- Export and Render Functions (Unchanged) ---
+            // Add field-level difference counts
+            metrics.topDiffFields.forEach(fieldCountStr => {
+                const parts = fieldCountStr.match(/(.*) \((.*)\)/);
+                if (parts) {
+                    summaryData.push([parts[1], parseInt(parts[2], 10)]);
+                }
+            });
+
+            const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
+
+            // Set column widths for better display
+            const cols = [{ wch: 40 }, { wch: 15 }];
+            wsSummary['!cols'] = cols;
+            
+            XLSX.utils.book_append_sheet(wb, wsSummary, "Summary");
+        }
+
+
+        // --- Export and Render Functions ---
 
         /**
          * Generates and triggers download of the Excel (.xlsx) file with styling.
@@ -463,65 +525,101 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
         function exportToExcel(comparisonResult) {
             const { keyHeaders, nonKeyHeaders, rows } = comparisonResult;
             
-            // Define the style object for red font in SheetJS
-            const RED_FONT_STYLE = {
-                font: { name: "Inter", color: { rgb: "FFFF0000" } }
-            };
-            
+            // Define the style object for red font and row backgrounds in SheetJS
+            const RED_FONT_STYLE = { font: { name: "Inter", color: { rgb: "FFFF0000" } } };
+            const SOURCE_FILL_STYLE = { fill: { patternType: "solid", fgColor: { rgb: "FFE0F2FE" } } }; // Light Blue
+            const DEST_FILL_STYLE = { fill: { patternType: "solid", fgColor: { rgb: "FFF3F4F6" } } }; // Light Gray
+            const UNMATCHED_FILL_STYLE = { fill: { patternType: "solid", fgColor: { rgb: "FFFEE2E2" } } }; // Light Red (Red-100)
+
             // Create a blank SheetJS workbook
             const wb = XLSX.utils.book_new();
+            
+            // 1. Create Summary Sheet
+            const metrics = getComparisonMetrics(comparisonResult);
+            createSummarySheet(wb, metrics); 
+
+            // 2. Create Comparison Report Sheet
             const ws = XLSX.utils.aoa_to_sheet([]);
 
-            // 1. Write Headers (STATUS, Key Columns, then Non-Key Columns (Source/Dest))
-            const headers = [{ v: 'STATUS', t: 's' }]; 
+            // Write Headers (STATUS, File_Source, Key Columns, then all Non-Key Columns)
+            const headers = [{ v: 'STATUS', t: 's' }, { v: 'File_Source', t: 's' }];
             
             keyHeaders.forEach(header => {
                 headers.push({ v: `${header} (Key)`, t: 's' });
             });
 
             nonKeyHeaders.forEach(header => {
-                headers.push({ v: `${header} (Source)`, t: 's' });
-                headers.push({ v: `${header} (Destination)`, t: 's' });
+                headers.push({ v: header, t: 's' }); // Only one header per data column
             });
             
             XLSX.utils.sheet_add_aoa(ws, [headers.map(h => h.v)], { origin: 'A1' });
 
-            // 2. Write Data Rows
+            // Write Data Rows (Generating two rows for MATCHED/MISMATCHED keys)
             rows.forEach(row => {
-                const rowData = [];
-                
-                // Add STATUS column
-                rowData.push({ v: row.status, t: 's', s: row.status === 'SOURCE_ONLY' || row.status === 'DESTINATION_ONLY' ? RED_FONT_STYLE : {} });
-                
-                // Add Key Columns (using Source value as canonical)
-                row.keyValues.forEach(kv => {
-                    rowData.push({ v: kv.source, t: 's' }); 
-                });
+                const isMatchedOrMismatched = row.status === 'MATCHED' || row.status === 'MISMATCHED';
 
-                // Add data for non-key columns (Source vs Destination)
-                nonKeyHeaders.forEach(header => {
-                    const cellData = row.cells[header];
-
-                    // Source Cell
-                    const sourceCell = { v: cellData ? cellData.source : '', t: 's' };
-                    // Apply red style if the cell is mismatched
-                    if (cellData && cellData.isDiff) {
-                        sourceCell.s = RED_FONT_STYLE;
-                    }
-                    rowData.push(sourceCell);
+                // --- 2a. Generate Source Row ---
+                if (row.status !== 'DESTINATION_ONLY') { // Source data exists
+                    const sourceRowData = [];
+                    const rowFillStyle = isMatchedOrMismatched ? SOURCE_FILL_STYLE : UNMATCHED_FILL_STYLE;
                     
-                    // Destination Cell
-                    const destCell = { v: cellData ? cellData.dest : '', t: 's' };
-                    if (cellData && cellData.isDiff) {
-                        destCell.s = RED_FONT_STYLE;
-                    }
-                    rowData.push(destCell);
-                });
+                    // STATUS and File_Source
+                    sourceRowData.push({ v: row.status, t: 's', s: rowFillStyle });
+                    sourceRowData.push({ v: 'Source', t: 's', s: rowFillStyle });
+                    
+                    // Key Columns (Source Value)
+                    row.keyValues.forEach(kv => {
+                        sourceRowData.push({ v: kv.source, t: 's', s: rowFillStyle }); 
+                    });
 
-                XLSX.utils.sheet_add_aoa(ws, [rowData], { origin: -1 });
+                    // Data Columns (Source Value)
+                    nonKeyHeaders.forEach(header => {
+                        const cellData = row.cells[header];
+                        const cellValue = cellData ? cellData.source : '';
+                        
+                        const cell = { v: cellValue, t: 's', s: rowFillStyle };
+                        // Apply red font style if Mismatch is true AND we are in a Mismatched/Matched block
+                        if (isMatchedOrMismatched && cellData && cellData.isDiff) {
+                            cell.s = { ...rowFillStyle, ...RED_FONT_STYLE };
+                        }
+                        sourceRowData.push(cell);
+                    });
+
+                    XLSX.utils.sheet_add_aoa(ws, [sourceRowData], { origin: -1 });
+                }
+
+                // --- 2b. Generate Destination Row ---
+                if (row.status !== 'SOURCE_ONLY') { // Destination data exists
+                    const destRowData = [];
+                    const rowFillStyle = isMatchedOrMismatched ? DEST_FILL_STYLE : UNMATCHED_FILL_STYLE;
+
+                    // STATUS and File_Source
+                    destRowData.push({ v: row.status, t: 's', s: rowFillStyle });
+                    destRowData.push({ v: 'Destination', t: 's', s: rowFillStyle });
+                    
+                    // Key Columns (Destination Value)
+                    row.keyValues.forEach(kv => {
+                        destRowData.push({ v: kv.dest, t: 's', s: rowFillStyle }); 
+                    });
+
+                    // Data Columns (Destination Value)
+                    nonKeyHeaders.forEach(header => {
+                        const cellData = row.cells[header];
+                        const cellValue = cellData ? cellData.dest : '';
+
+                        const cell = { v: cellValue, t: 's', s: rowFillStyle };
+                        // Apply red font style if Mismatch is true AND we are in a Mismatched/Matched block
+                        if (isMatchedOrMismatched && cellData && cellData.isDiff) {
+                            cell.s = { ...rowFillStyle, ...RED_FONT_STYLE };
+                        }
+                        destRowData.push(cell);
+                    });
+
+                    XLSX.utils.sheet_add_aoa(ws, [destRowData], { origin: -1 });
+                }
             });
 
-            // 3. Finalize and Download
+            // Finalize and Download
             XLSX.utils.book_append_sheet(wb, ws, "Comparison Report");
             XLSX.writeFile(wb, "CSV_Comparison_Report.xlsx");
         }
@@ -547,35 +645,20 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
 
             let html = '<table class="min-w-full divide-y divide-gray-300 rounded-xl overflow-hidden shadow-lg">';
 
-            // Table Header Row 1 (Main Header)
+            // Table Header Row
             html += '<thead class="bg-gray-100 sticky top-0">';
             html += '<tr>';
+            html += `<th class="px-3 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-left">STATUS</th>`;
+            html += `<th class="px-3 py-3 text-xs font-medium text-gray-700 uppercase tracking-wider text-left">File_Source</th>`;
             
             // Key Columns Header
             keyHeaders.forEach(header => {
                 html += `<th class="px-3 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-left">${header} (Key)</th>`;
             });
             
-            // Status Header
-            html += `<th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider text-left">Status</th>`;
-            
-            // Non-Key Columns Header (spanning Source/Dest)
+            // Non-Key Columns Header (only once)
             nonKeyHeaders.forEach(header => {
-                html += `<th colspan="2" class="px-6 py-3 text-xs font-medium text-gray-700 uppercase tracking-wider text-center border-l border-gray-300 bg-gray-200">${header}</th>`;
-            });
-            html += '</tr>';
-
-            // Table Header Row 2 (Sub-Header for Source/Dest)
-            html += '<tr>';
-            
-            // Placeholder for Key Columns + Status (single cell per key column)
-            html += keyHeaders.map(() => '<th class="px-3 py-2 text-xs text-gray-500 uppercase tracking-wider text-left">Value</th>').join('');
-            html += '<th class="px-6 py-2 text-xs text-gray-500 uppercase tracking-wider text-left"></th>'; // Status header placeholder
-
-            // Source/Dest labels for non-key columns
-            nonKeyHeaders.forEach(() => {
-                html += '<th class="px-3 py-2 text-xs text-gray-600 font-semibold uppercase tracking-wider text-center border-l border-gray-300">Source</th>';
-                html += '<th class="px-3 py-2 text-xs text-gray-600 font-semibold uppercase tracking-wider text-center">Dest</th>';
+                html += `<th class="px-6 py-3 text-xs font-medium text-gray-700 uppercase tracking-wider text-left border-l border-gray-300">${header}</th>`;
             });
             html += '</tr>';
             html += '</thead>';
@@ -583,40 +666,67 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
             // Table Body
             html += '<tbody class="divide-y divide-gray-200 bg-white">';
             rowsToDisplay.forEach(row => {
-                let rowClass = '';
-                if (row.status === 'MATCHED') {
-                    rowClass = 'matched-row';
-                } else if (row.status === 'MISMATCHED') {
-                    rowClass = 'unmatched-row';
-                } else if (row.status === 'SOURCE_ONLY' || row.status === 'DESTINATION_ONLY') {
-                    rowClass = 'bg-red-50';
+                const isMatchedOrMismatched = row.status === 'MATCHED' || row.status === 'MISMATCHED';
+
+                // --- 1. Source Row ---
+                if (row.status !== 'DESTINATION_ONLY') {
+                    const rowClass = isMatchedOrMismatched ? 'source-row' : 'unmatched-record';
+                    html += `<tr class="${rowClass} hover:opacity-80 transition duration-100 border-b-2 border-indigo-200/50">`;
+                    
+                    // STATUS and File_Source
+                    html += `<td class="px-3 py-3 whitespace-nowrap text-xs font-semibold ${row.status === 'SOURCE_ONLY' || row.status === 'MISMATCHED' ? 'text-red-600' : 'text-green-600'}">${row.status}</td>`;
+                    html += `<td class="px-3 py-3 whitespace-nowrap text-sm font-medium text-indigo-700">Source</td>`;
+
+                    // Key Column Values
+                    row.keyValues.forEach(kv => {
+                        html += `<td class="px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${kv.source}</td>`;
+                    });
+
+                    // Data Cells (Non-Key)
+                    nonKeyHeaders.forEach(header => {
+                        const cell = row.cells[header];
+                        const cellValue = cell ? cell.source : '';
+                        
+                        let cellClass = 'text-gray-700';
+                        if (isMatchedOrMismatched && cell && cell.isDiff) {
+                            cellClass = 'mismatch-cell';
+                        }
+                        
+                        html += `<td class="px-6 py-3 whitespace-nowrap text-sm ${cellClass}">${cellValue}</td>`;
+                    });
+                    
+                    html += '</tr>';
                 }
 
-                html += `<tr class="${rowClass} hover:bg-gray-50 transition duration-100">`;
-                
-                // Key Column Values
-                row.keyValues.forEach(kv => {
-                    // Display the canonical key value (from source/dest based on row status)
-                    html += `<td class="px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${kv.source}</td>`;
-                });
-                
-                // Status
-                html += `<td class="px-6 py-3 whitespace-nowrap text-xs font-semibold ${row.diffs > 0 || row.status !== 'MATCHED' ? 'text-red-600' : 'text-green-600'}">${row.status}</td>`;
+                // --- 2. Destination Row ---
+                if (row.status !== 'SOURCE_ONLY') {
+                    const rowClass = isMatchedOrMismatched ? 'dest-row' : 'unmatched-record';
+                    html += `<tr class="${rowClass} hover:opacity-80 transition duration-100">`;
+                    
+                    // STATUS and File_Source
+                    html += `<td class="px-3 py-3 whitespace-nowrap text-xs font-semibold ${row.status === 'DESTINATION_ONLY' || row.status === 'MISMATCHED' ? 'text-red-600' : 'text-green-600'}">${row.status}</td>`;
+                    html += `<td class="px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-700">Destination</td>`;
 
-                // Data Cells (Non-Key)
-                nonKeyHeaders.forEach(header => {
-                    const cell = row.cells[header];
-                    if (cell) {
-                        const cellClass = cell.isDiff ? 'mismatch-cell' : 'text-gray-700';
+                    // Key Column Values
+                    row.keyValues.forEach(kv => {
+                        html += `<td class="px-3 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${kv.dest}</td>`;
+                    });
+
+                    // Data Cells (Non-Key)
+                    nonKeyHeaders.forEach(header => {
+                        const cell = row.cells[header];
+                        const cellValue = cell ? cell.dest : '';
                         
-                        // Source Value
-                        html += `<td class="px-3 py-2 whitespace-nowrap text-sm ${cellClass} border-l border-gray-200">${cell.source}</td>`;
-                        // Destination Value
-                        html += `<td class="px-3 py-2 whitespace-nowrap text-sm ${cellClass}">${cell.dest}</td>`;
-                    }
-                });
-                
-                html += '</tr>';
+                        let cellClass = 'text-gray-700';
+                        if (isMatchedOrMismatched && cell && cell.isDiff) {
+                            cellClass = 'mismatch-cell';
+                        }
+
+                        html += `<td class="px-6 py-3 whitespace-nowrap text-sm ${cellClass}">${cellValue}</td>`;
+                    });
+                    
+                    html += '</tr>';
+                }
             });
             html += '</tbody>';
             html += '</table>';
@@ -629,7 +739,8 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
         async function compareAndExport() {
             const file1 = csvFile1.files[0];
             const file2 = csvFile2.files[0];
-            
+            const headerFilterFile = headerFile.files[0]; // NEW
+
             const pkColumnInputVal = pkColumnInput.value.trim();
             const isSingleKeyMode = keyTypeSingle.checked;
             
@@ -639,7 +750,7 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
                 .filter(col => col.length > 0);
 
             if (!file1 || !file2 || compositeKeyColumns.length === 0) {
-                showMessage("Please select both files and specify at least one column name for the key.", 'error');
+                showMessage("Please select both data files and specify at least one column name for the key.", 'error');
                 return;
             }
 
@@ -656,15 +767,25 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
             llmResultDiv.classList.add('hidden'); // Hide previous LLM result
 
             try {
-                // 1. Parse Files (Source: Comma, Destination: Pipe)
+                // 1. Parse Files
                 const sourceData = await parseFile(file1, ',');
                 const destData = await parseFile(file2, '|');
                 
                 sourceRecordCount = sourceData.length;
                 destRecordCount = destData.length;
+                
+                let reportHeaders = null;
+                if (headerFilterFile) {
+                    const headerData = await parseFile(headerFilterFile, '|');
+                    if (headerData.length === 0) {
+                        throw new Error("Header Filter File is empty or could not be parsed correctly.");
+                    }
+                    // The keys of the first row object are the desired headers
+                    reportHeaders = Object.keys(headerData[0]);
+                }
 
                 if (sourceRecordCount === 0 || destRecordCount === 0) {
-                    throw new Error("One or both files are empty or could not be parsed correctly.");
+                    throw new Error("One or both primary data files are empty or could not be parsed correctly.");
                 }
 
                 // Check if all key columns exist in headers of both files
@@ -673,12 +794,12 @@ Provide a concise, 3-4 sentence executive summary focused on the magnitude of th
                 
                 for (const key of compositeKeyColumns) {
                     if (!sourceHeaders.includes(key) || !destHeaders.includes(key)) {
-                        throw new Error(`Key Column '${key}' not found in headers of both files. Please check spelling/casing.`);
+                        throw new Error(`Key Column '${key}' not found in headers of both data files. Please check spelling/casing.`);
                     }
                 }
 
                 // 2. Perform Comparison
-                const comparisonResult = performComparison(sourceData, destData, compositeKeyColumns);
+                const comparisonResult = performComparison(sourceData, destData, compositeKeyColumns, reportHeaders);
                 lastComparisonResult = comparisonResult; // Store result globally
 
                 // 3. Render HTML Preview
